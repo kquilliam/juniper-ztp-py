@@ -11,6 +11,7 @@ import jcs
 import requests
 import time
 import sys
+
 def myprogress(dev, report):
     print("host: {}, report: {}".format(dev.hostname, report))
 
@@ -128,6 +129,7 @@ try:
 except NameError:
     print("No software defined for this model. Exiting.")
     jcs.syslog("interact.notice", "ZTP - No software defined for this model. Exiting.")
+    reactivate_event()
     sys.exit()
 
 with Device() as dev:
@@ -165,11 +167,7 @@ if version not in pkg:
             ok = sw.install(package=pkg, progress=myprogress )
         if ok:
             time.sleep(30)
-            cu = Config(dev)
-            cu.lock()
-            cu.load("activate event-options generate-event ZTP")
-            cu.commit()
-            cu.unlock()
+            reactivate_event()
             print("Rebooting device")
             if vmhost:
                 sw.reboot(in_min=0,vmhost=True)
