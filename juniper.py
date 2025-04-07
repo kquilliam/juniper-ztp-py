@@ -152,7 +152,7 @@ with Device() as dev:
         sys.exit()
 
 if version not in pkg:
-    remote_path = "<web-server>"
+    remote_path = "<web_server>"
     pkg = remote_path + "/" + pkg
     
     with Device() as dev:
