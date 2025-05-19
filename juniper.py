@@ -1,5 +1,21 @@
 #!/usr/bin/python
 
+"""
+juniper.py
+
+Zero Touch Provisioning (ZTP) automation script for Juniper devices.
+This script connects to a Juniper device, gathers its identity and model information,
+communicates with Netbox to validate, locate, and fetch rendered device configuration,
+optionally upgrades the device software, then applies new configuration after a pre-check.
+All relevant actions and failures are logged via syslog, and event-options are activated/deactivated
+for ZTP retry/continuity depending on the result.
+"""
+"""
+This script utilizes Netbox for configurations and preferred versions(via config context), and uses Artifactory for an image repository. You will need to replace these as needed for your environment.
+These are the variables to replace for Netbox:
+Replace {nb_url} with your URL for netbox
+Replace {_nb_token} with your token for Netbox(Will need "create" access to retrieve the config)
+"""
 from jnpr.junos import Device
 from jnpr.junos.utils.config import Config
 from jnpr.junos.utils.sw import SW
@@ -13,9 +29,24 @@ import time
 import sys
 
 def myprogress(dev, report):
+    """
+    Progress callback for SW.install() operations.
+    Logs software installation progress to stdout and syslog.
+    Args:
+        dev (Device): Junos Device instance.
+        report (str): Installation progress status.
+    """
     print("host: {}, report: {}".format(dev.hostname, report))
+    jcs.syslog("interact.notice", "ZTP - host: {}, report: {}".format(dev.hostname, report))
 
 def check_configuration(config_data):
+    """
+    Loads candidate configuration and performs a commit-check on the device (does not apply changes).
+    Args:
+        config_data (str): Configuration in text format to load and check.
+    Returns:
+        bool: True if commit check passes, False otherwise.
+    """
     dev = Device()
     dev.open()
     try:
@@ -28,17 +59,26 @@ def check_configuration(config_data):
             cu.unlock()
         return True
     except LockError as err:
+        # Failed to get exclusive lock on config
         print("Error locking configuration: {}".format(err))
         jcs.syslog("interact.notice", "ZTP - Error locking configuration: {}".format(err))
         reactivate_event()
         return False
     except ConfigLoadError as err:
+        # Failed to load or parse configuration
         print("Error loading configuration: {}".format(err))
         jcs.syslog("interact.notice", "ZTP - Error loading configuration: {}".format(err))
         reactivate_event()
         return False
 
 def apply_configuration(config_data):
+    """
+    Loads and commits the provided configuration on the device.
+    Args:
+        config_data (str): Configuration in text format to load and apply.
+    Returns:
+        bool: True if commit succeeds, False otherwise.
+    """
     dev = Device()
     dev.open()
     try:
@@ -59,12 +99,25 @@ def apply_configuration(config_data):
         reactivate_event()
         return False
 
-def reactivate_event():
+def reactivate_event(post_reboot=False):
+    """
+    Reactivates the event-options to generate another ZTP event after a delay, enabling retries.
+    The log/syslog message differs depending on whether this is after a successful reboot or an error/retry.
+    Args:
+        post_reboot (bool): If True, indicates called after successful software upgrade & reboot. Default False.
+    Returns:
+        bool: True if activation succeeds, False otherwise.
+    """
     dev = Device()
     dev.open()
     try:
-        print("Reactivating Event Option for ZTP. Will try again in 60 seconds.")
-        jcs.syslog("interact.notice", "ZTP - Reactivating Event Option for ZTP. Will try again in 60 seconds.")
+        if post_reboot:
+            msg = "ZTP - Reactivating Event Option after successful software upgrade so it will run after the reboot"
+            print("Reactivating Event Option after successful software upgrade so it will run after the reboot")
+        else:
+            msg = "ZTP - Reactivating Event Option for ZTP. Will try again in 60 seconds."
+            print("Reactivating Event Option for ZTP. Will try again in 60 seconds.")
+        jcs.syslog("interact.notice", msg)
         with Config(dev) as cu:
             cu.lock()
             cu.load("activate event-options generate-event ZTP")
@@ -80,58 +133,95 @@ def reactivate_event():
         jcs.syslog("interact.notice", "ZTP - Error activating configuration: {}".format(err))
         return False
 
+# Initial device connection to retrieve facts and identify this device in Netbox
 with Device() as dev:
     serialnumber = (dev.facts['serialnumber'])
     model = (dev.facts['model'])
     version = (dev.facts['version'])
-    print(f"Located Device Serial Number: {serialnumber} on {model}")
-    jcs.syslog("interact.notice", f"ZTP - Located Device Serial Number: {serialnumber} on {model}")
+    print(f"This device's serial number: {serialnumber}")
+    print(f"This device's model: {model}")
+    print(f"This device's version: {version}")
+    jcs.syslog("interact.notice", f"ZTP - This device's serial number: {serialnumber}")
+    jcs.syslog("interact.notice", f"ZTP - This device's model: {model}")
+    jcs.syslog("interact.notice", f"ZTP - This device's version: {version}")
 
-if "QFX5120" in model:
-    pkg = "junos-install-qfx-arm-64-22.4R3-S6.5.tgz"
-    vmhost = True
-    
-if "EX2300-C" in model:
-    pkg = "junos-arm-32-23.4R2-S4.11.tgz"
-    vmhost = False
+# Variables to store package, VM host flag, and force_host flag for SW upgrade
+pkg = ""
+vmhost = False
+force_host = False
 
-if "EX3400" in model:
-    pkg = "junos-arm-32-23.4R2-S4.11.tgz"
-    vmhost = False
+# Compose Netbox API URL using serial number
+url = "https://{netbox_url}/api/dcim/devices"
+find_serial_url = f"{url}/?serial={serialnumber}"
 
-if "EX4100" in model:
-    if "EX4100-F-12" in model:
-        pkg = "junos-install-ex-arm-64-23.4R2-S4.11.tgz"
-    else:
-        if "EX4100-H" in model:
-            pkg = "junos-install-ex-arm-64-24.4R1.10.tgz"
-        else:
-            pkg = "junos-install-ex-arm-64-23.4R2-S4.11.tgz"
-    vmhost = False
+# Static API Token for Netbox (for automation purposes)
+nb_token = "{_nb_token}"
+headers = {
+    "Authorization": f"Token {nb_token}"
+}
+print(f"Searching for Device in Netbox using Serial Number: {serialnumber}")
+jcs.syslog("interact.notice", f"ZTP - Searching for Device in Netbox using Serial Number: {serialnumber}")
 
-if "EX4300" in model:
-    if "MP" in model:
-        pkg = "jinstall-host-ex-4300mp-x86-64-23.4R2-S4.11-secure-signed.tgz"
-    else:
-        pkg = "jinstall-ex-4300-21.4R3-S10.9-signed.tgz"
-    vmhost = False
-
-if "EX4400" in model:
-    pkg = "junos-install-ex-x86-64-23.4R2-S4.11.tgz"
-    vmhost = False
-
-if "EX4600" in model:
-    pkg = "jinstall-host-ex-4600-21.4R3-S10.13-signed.tgz"
-    vmhost = True
-
+# Query Netbox for device by serial number
 try:
-    pkg
-except NameError:
-    print("No software defined for this model. Exiting.")
-    jcs.syslog("interact.notice", "ZTP - No software defined for this model. Exiting.")
+    nb_device_response = requests.get(find_serial_url, headers=headers, verify=False)
+except requests.exceptions.RequestException as e:
+    # If request fails, log and retry event later
+    print(f"Error making request: {e}")
+    jcs.syslog("interact.notice", f"ZTP - Error making request: {e}")
     reactivate_event()
     sys.exit()
 
+response_json = nb_device_response.json()
+results = response_json.get("results", [])
+
+# Check if device with matching serial exists in Netbox
+if results:
+    print("Device With This Serial Number Located in Netbox")
+    jcs.syslog("interact.notice", "ZTP - Device With This Serial Number Located in Netbox")
+    first_result = results[0]
+    device_name = first_result.get("name")
+    device_id = first_result.get("id")
+    device_model = first_result.get("device_type", {}).get("model")
+    print(f"Device Name: {device_name}")
+    jcs.syslog("interact.notice", f"ZTP - Device Name: {device_name}")
+    print(f"Netbox Device ID: {device_id}")
+    jcs.syslog("interact.notice", f"ZTP - Netbox Device ID: {device_id}")
+    print(f"Device Model: {device_model}")
+    jcs.syslog("interact.notice", f"ZTP - Device Model: {device_model}")
+else:
+    print("No device found. Verify that this device's serial number is in Netbox.")
+    jcs.syslog("interact.notice", "ZTP - No device found. Verify that this device's serial number is in Netbox.")
+    reactivate_event() 
+    exit()
+
+# Ensure device model in Netbox matches actual device
+if model != device_model:
+    print(f"Device model in Netbox ({device_model}) does not match this device ({model}).")
+    jcs.syslog("interact.notice", f"ZTP - Device model in Netbox ({device_model}) does not match this device ({model}).")
+    reactivate_event()
+    exit()
+
+# Parse config_context to get upgrade and provisioning info from Netbox
+for entry in results:
+    config_context = entry.get("config_context", {})
+    pkg = config_context.get("pkg")
+    target_version = config_context.get("target_version")
+    if config_context.get("vmhost") == True:
+        vmhost = True
+    if config_context.get("force_host") == True:
+        force_host = True
+    if pkg and target_version:
+        pkg = pkg.replace("{target_version}", target_version)
+        print(f"Located Target Version for this model: {target_version}")
+        jcs.syslog("interact.notice", f"ZTP - Located Target Version for this model: {target_version}")
+    else:
+        print("No Target Version for this model found")
+        jcs.syslog("interact.notice", "ZTP - No Target Version for this model found")
+        reactivate_event()
+        exit()
+
+# Deactivate ZTP event-options to avoid repeated triggering during provisioning/run
 with Device() as dev:
     cu = Config(dev)
     print("Deactivating Event Option to Keep From Overrunning")
@@ -153,87 +243,67 @@ with Device() as dev:
         dev.close()
         sys.exit()
 
-if version not in pkg:
-    remote_path = "<web_server>"
-    pkg = remote_path + "/" + pkg
+# Upgrade device OS if not running target version
+if version != target_version:
+    # Prepare Artifactory details for package download
+    remote_path = "{artifactory_url}/firmware/juniper"
+    artifactory_user = "{artifactory_user}"
+    artifactory_password = "{artifactory_pass}"
+    pkg_ = "https://" + artifactory_user + ":" + artifactory_password + "@" + remote_path + "/" + pkg
+    print(f"Device needs to be upgraded to {target_version}")
+    jcs.syslog("interact.notice", f"ZTP - Device needs to be upgraded to {target_version}")
     
     with Device() as dev:
         sw = SW(dev)
-        print(f"Installing {pkg} for {model}")
+        print(f"Installing {target_version} for {model}")
         jcs.syslog("interact.notice", f"ZTP - Installing {pkg} for {model}")
-        if vmhost:
-            ok = sw.install(package=pkg, no_copy=True, vmhost=True, progress=myprogress)
-        else:
-            ok = sw.install(package=pkg, progress=myprogress )
-        if ok:
-            time.sleep(30)
-            reactivate_event()
-            print("Rebooting device")
+        try:
+            # Install using correct options based on vmhost/force_host flags
             if vmhost:
-                sw.reboot(in_min=0,vmhost=True)
+                print("Device is a VM host. Installing VM host package.")
+                jcs.syslog("interact.notice", "ZTP - Device is a VMhost. Installing VMhost package.")
+                ok = sw.install(package=pkg_, no_copy=True, vmhost=True, progress=myprogress)
+            if force_host:
+                print("Device is a VM host. Forcing VM host package.")
+                jcs.syslog("interact.notice", "Device is a VM host. Forcing VM host package.")
+                ok = sw.install(package=pkg_, no_copy=True, force_host=True, progress=myprogress)
+            else:
+                ok = sw.install(package=pkg_, no_copy=True, progress=myprogress)
+        except Exception as err:
+            print("Error installing software: {}".format(err))
+            jcs.syslog("interact.notice", f"ZTP - Error installing software: {err}")
+            ok = False
+        if ok is True:
+            print("Rebooting device")
+            jcs.syslog("interact.notice", "ZTP - Rebooting device")
+            if vmhost:
+                sw.reboot(in_min=0, vmhost=True)
             else:
                 sw.reboot(in_min=0)
+            # Wait 30 seconds and reactivate event options so it will trigger after reboot completes
+            time.sleep(30)
+            reactivate_event(post_reboot=True)
             exit()
         else:
-            msg = "Unable to install software"
+            print("Unable to install software")
+            jcs.syslog("interact.notice", f"ZTP - Unable to Install Software")
             reactivate_event()
             exit()
 else:
     print(f"Device is already running version {version}. Continuing.")
     jcs.syslog("interact.notice", f"ZTP - Device is already running version {version}. Continuing.")
 
-url = "<netbox_url>/api/dcim/devices"
-find_serial_url = f"{url}/?serial={serialnumber}"
-
-nb_token = "<netbox_token>"
-headers = {
-    "Authorization": f"Token {nb_token}"
-}
-# Make the GET request with the headers containing your auth token
-print(f"Searching for Device in Netbox using Serial Number: {serialnumber}")
-jcs.syslog("interact.notice", f"ZTP - Searching for Device in Netbox using Serial Number: {serialnumber}")
-
-try:
-    nb_device_response = requests.get(find_serial_url, headers=headers)
-except requests.exceptions.RequestException as e:
-    print(f"Error making request: {e}")
-    jcs.syslog("interact.notice", f"ZTP - Error making request: {e}")
-    reactivate_event()
-    sys.exit()
-
-# Check if the request was successful
-#if nb_device_response.status_code == 200:
-    # Process successful response
-data = nb_device_response.json()
-response_json = nb_device_response.json()
-results = response_json.get("results", [])
-
-if results:
-    print("Device With This Serial Number Located in Netbox")
-    jcs.syslog("interact.notice", "ZTP - Device With This Serial Number Located in Netbox")
-    # Assuming you want to get the first result
-    first_result = results[0]
-    # Now you can work with the first result
-    device_name = first_result.get("name")
-    device_id = first_result.get("id")
-    print(f"Device Name: {device_name}")
-    jcs.syslog("interact.notice", f"ZTP - Device Name: {device_name}")
-    print(f"Netbox Device ID: {device_id}")
-    jcs.syslog("interact.notice", f"ZTP - Netbox Device ID: {device_id}")
-else:
-    print("No device found. Verify that this device's serial number is in Netbox.")
-    jcs.syslog("interact.notice", "ZTP - No device found. Verify that this device's serial number is in Netbox.")
-    reactivate_event() 
-    exit()
-
+# Fetch rendered configuration from Netbox
 find_config_url = f"{url}/{device_id}/render-config/?format=txt"
 
 try:
-    nb_config_response = requests.post(find_config_url, headers=headers)
+    nb_config_response = requests.post(find_config_url, headers=headers, verify=False)
     nb_config_response.raise_for_status()
 except requests.exceptions.HTTPError as e:
     print(f"HTTP Error: {e}")
+    print("Verify device has a valid, rendered config in Netbox")
     jcs.syslog("interact.notice", f"ZTP - HTTP Error: {e}")
+    jcs.syslog("interace.notice", f"ZTP - Verify device has a valid, rendered config in Netbox")
     reactivate_event()
     sys.exit()
 except requests.exceptions.RequestException as e:
@@ -245,15 +315,19 @@ except requests.exceptions.RequestException as e:
 print("Device Configuration Retrieved")
 jcs.syslog("interact.notice", "ZTP - Device Configuration Retrieved")
 config_data = nb_config_response.text
+
+# Validate configuration, apply it, and report outcomes
 if check_configuration(config_data):
     print("Configuration is valid")
     jcs.syslog("interact.notice", "ZTP - Configuration is valid")
     if apply_configuration(config_data):
         print("Configuration applied successfully")
+        print("ZTP Process Completed. Device is ready for deployment.")
         jcs.syslog("interact.notice", "ZTP - Configuration applied successfully")
+        jcs.syslog("interact.notice", "ZTP - ZTP Process Completed. Device is ready for deployment.")
     else:
         print("Failed to apply configuration")
-        jcs.syslog("interact.notice", "ZTP - Failed to apply configuration")
+        jcs.syslog("interact.notice", "ZTP - Failed to apply configuration.")
 else:
     print("Configuration check failed")
     jcs.syslog("interact.notice", "ZTP - Configuration check failed, Check rendered configuration in Netbox for errors.")
