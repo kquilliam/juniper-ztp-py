@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 """
-juniper.py
+juniper_public.py
 
 Zero Touch Provisioning (ZTP) automation script for Juniper devices.
 This script connects to a Juniper device, gathers its identity and model information,
@@ -10,12 +10,7 @@ optionally upgrades the device software, then applies new configuration after a 
 All relevant actions and failures are logged via syslog, and event-options are activated/deactivated
 for ZTP retry/continuity depending on the result.
 """
-"""
-This script utilizes Netbox for configurations and preferred versions(via config context), and uses Artifactory for an image repository. You will need to replace these as needed for your environment.
-These are the variables to replace for Netbox:
-Replace {nb_url} with your URL for netbox
-Replace {_nb_token} with your token for Netbox(Will need "create" access to retrieve the config)
-"""
+
 from jnpr.junos import Device
 from jnpr.junos.utils.config import Config
 from jnpr.junos.utils.sw import SW
@@ -59,13 +54,11 @@ def check_configuration(config_data):
             cu.unlock()
         return True
     except LockError as err:
-        # Failed to get exclusive lock on config
         print("Error locking configuration: {}".format(err))
         jcs.syslog("interact.notice", "ZTP - Error locking configuration: {}".format(err))
         reactivate_event()
         return False
     except ConfigLoadError as err:
-        # Failed to load or parse configuration
         print("Error loading configuration: {}".format(err))
         jcs.syslog("interact.notice", "ZTP - Error loading configuration: {}".format(err))
         reactivate_event()
@@ -151,11 +144,11 @@ vmhost = False
 force_host = False
 
 # Compose Netbox API URL using serial number
-url = "https://{netbox_url}/api/dcim/devices"
+url = "https://<netbox>/api/dcim/devices"
 find_serial_url = f"{url}/?serial={serialnumber}"
 
 # Static API Token for Netbox (for automation purposes)
-nb_token = "{_nb_token}"
+nb_token = "YOUR_API_TOKEN_HERE"
 headers = {
     "Authorization": f"Token {nb_token}"
 }
@@ -164,9 +157,8 @@ jcs.syslog("interact.notice", f"ZTP - Searching for Device in Netbox using Seria
 
 # Query Netbox for device by serial number
 try:
-    nb_device_response = requests.get(find_serial_url, headers=headers, verify=False)
+    nb_device_response = requests.get(find_serial_url, headers=headers, verify=True)
 except requests.exceptions.RequestException as e:
-    # If request fails, log and retry event later
     print(f"Error making request: {e}")
     jcs.syslog("interact.notice", f"ZTP - Error making request: {e}")
     reactivate_event()
@@ -245,20 +237,15 @@ with Device() as dev:
 
 # Upgrade device OS if not running target version
 if version != target_version:
-    # Prepare Artifactory details for package download
-    remote_path = "{artifactory_url}/firmware/juniper"
-    artifactory_user = "{artifactory_user}"
-    artifactory_password = "{artifactory_pass}"
-    pkg_ = "https://" + artifactory_user + ":" + artifactory_password + "@" + remote_path + "/" + pkg
+    pkg_ = f"http://<file-server>/juniper/firmware/{pkg}"
     print(f"Device needs to be upgraded to {target_version}")
     jcs.syslog("interact.notice", f"ZTP - Device needs to be upgraded to {target_version}")
-    
+
     with Device() as dev:
         sw = SW(dev)
         print(f"Installing {target_version} for {model}")
         jcs.syslog("interact.notice", f"ZTP - Installing {pkg} for {model}")
         try:
-            # Install using correct options based on vmhost/force_host flags
             if vmhost:
                 print("Device is a VM host. Installing VM host package.")
                 jcs.syslog("interact.notice", "ZTP - Device is a VMhost. Installing VMhost package.")
@@ -280,13 +267,12 @@ if version != target_version:
                 sw.reboot(in_min=0, vmhost=True)
             else:
                 sw.reboot(in_min=0)
-            # Wait 30 seconds and reactivate event options so it will trigger after reboot completes
             time.sleep(30)
             reactivate_event(post_reboot=True)
             exit()
         else:
             print("Unable to install software")
-            jcs.syslog("interact.notice", f"ZTP - Unable to Install Software")
+            jcs.syslog("interact.notice", "ZTP - Unable to Install Software")
             reactivate_event()
             exit()
 else:
@@ -297,13 +283,13 @@ else:
 find_config_url = f"{url}/{device_id}/render-config/?format=txt"
 
 try:
-    nb_config_response = requests.post(find_config_url, headers=headers, verify=False)
+    nb_config_response = requests.post(find_config_url, headers=headers, verify=True)
     nb_config_response.raise_for_status()
 except requests.exceptions.HTTPError as e:
     print(f"HTTP Error: {e}")
     print("Verify device has a valid, rendered config in Netbox")
     jcs.syslog("interact.notice", f"ZTP - HTTP Error: {e}")
-    jcs.syslog("interace.notice", f"ZTP - Verify device has a valid, rendered config in Netbox")
+    jcs.syslog("interace.notice", "ZTP - Verify device has a valid, rendered config in Netbox")
     reactivate_event()
     sys.exit()
 except requests.exceptions.RequestException as e:
@@ -316,7 +302,6 @@ print("Device Configuration Retrieved")
 jcs.syslog("interact.notice", "ZTP - Device Configuration Retrieved")
 config_data = nb_config_response.text
 
-# Validate configuration, apply it, and report outcomes
 if check_configuration(config_data):
     print("Configuration is valid")
     jcs.syslog("interact.notice", "ZTP - Configuration is valid")
