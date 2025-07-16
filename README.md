@@ -1,4 +1,4 @@
-# Juniper Zero Touch Provisioning (ZTP) Automation – Public Example
+# Juniper Zero Touch Provisioning (ZTP) Automation
 
 This repository demonstrates an automation solution for Zero Touch Provisioning (ZTP) of Juniper network devices. It provides public-ready example files you can adapt for secure production deployment.
 
