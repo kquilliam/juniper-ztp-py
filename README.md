@@ -6,8 +6,8 @@ This repository demonstrates an automation solution for Zero Touch Provisioning 
 For your deployment, use Find & Replace to substitute these with your actual server addresses.
 ## Provided Example Files
 
-- `juniper_public.py` – A Python script automating device provisioning, Netbox integration, software upgrade, and configuration **with all private info removed**.
-- `juniper_public.conf` – A Junos configuration file to enable required system settings, authentication, events, and automation hooks (with no secrets or internal IPs).
+- `juniper.py` – A Python script automating device provisioning, Netbox integration, software upgrade, and configuration **with all private info removed**.
+- `juniper.conf` – A Junos configuration file to enable required system settings, authentication, events, and automation hooks (with no secrets or internal IPs).
 
 ## How It Works
 
@@ -24,7 +24,7 @@ This setup allows automated onboarding and provisioning of new Juniper devices i
 
 ## File Descriptions
 
-### `juniper_public.py`
+### `juniper.py`
 
 A Python 3 script (see file for full implementation) automating the following tasks:
 - **Device Identification**: Gathers serial, model, and OS info.
@@ -42,7 +42,7 @@ A Python 3 script (see file for full implementation) automating the following ta
     - No internal tokens, real URLs, or credentials included.
     - By default, certificate validation (`verify=True`) is **enabled** for all API calls.
 
-### `juniper_public.conf`
+### `juniper.conf`
 
 A Junos configuration sample for ZTP automation:
 - Sets up root authentication (encrypted password must be added by the operator).
@@ -59,8 +59,8 @@ A Junos configuration sample for ZTP automation:
 
 1. **Edit and Deploy Configuration**:  
    - Before use, replace placeholder URLs, tokens, and credentials in the example files with your own secure/environment-specific data.
-   - Load the configuration (juniper_public.conf) to new Juniper devices.
-   - Host the provisioning script (juniper_public.py) on a reachable HTTP or HTTPS server (see `<file-server>` placeholder in the files).
+   - Load the configuration (juniper.conf) to new Juniper devices.
+   - Host the provisioning script (juniper.py) on a reachable HTTP or HTTPS server (see `<file-server>` placeholder in the files).
 
 2. **Prepare Netbox**:  
    - Deploy your own Netbox instance (see [Netbox documentation](https://netbox.readthedocs.io/)).
